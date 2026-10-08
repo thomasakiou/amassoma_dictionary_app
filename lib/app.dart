@@ -7,7 +7,10 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models/dictionary_entry.dart';
+import 'models/tutor_message.dart';
+import 'pages/ai_tutor_page.dart';
 import 'services/dictionary_api.dart';
+import 'services/tutor_api.dart';
 
 const ink = Color(0xFF18232C);
 const ochre = Color(0xFF9B4B16);
@@ -120,6 +123,7 @@ class _DictionaryShellState extends State<DictionaryShell> {
   ];
 
   final _api = const DictionaryApi();
+  final _tutorApi = const TutorApi();
   final _player = AudioPlayer();
   final _searchController = TextEditingController();
   final _searchFocus = FocusNode();
@@ -128,14 +132,24 @@ class _DictionaryShellState extends State<DictionaryShell> {
   List<DictionaryEntry> _entries = [];
   List<String> _savedIds = [];
   List<String> _recentIds = [];
+  List<TutorMessage> _tutorMessages = const [
+    TutorMessage(
+      role: 'assistant',
+      content:
+          'Ask about an Amassoma word, request a short lesson, or switch to Practice for a quick quiz.',
+    ),
+  ];
   String? _error;
+  String? _tutorError;
   String? _playingId;
   String? _playingAlphabet;
   String? _letter;
   String? _category;
   int _tab = 0;
   bool _loading = true;
+  bool _tutorLoading = false;
   bool _englishFirst = false;
+  String _tutorMode = 'ask';
 
   @override
   void initState() {
@@ -245,6 +259,66 @@ class _DictionaryShellState extends State<DictionaryShell> {
     await _preferences?.setStringList('saved_entry_ids', _savedIds);
   }
 
+  Future<void> _sendTutorMessage(String question) async {
+    if (_tutorLoading || question.trim().isEmpty) return;
+    final history = List<TutorMessage>.of(_tutorMessages);
+    setState(() {
+      _tutorMessages = [
+        ..._tutorMessages,
+        TutorMessage(role: 'user', content: question.trim()),
+      ];
+      _tutorLoading = true;
+      _tutorError = null;
+    });
+
+    try {
+      final reply = await _tutorApi.ask(
+        question: question.trim(),
+        mode: _tutorMode,
+        conversation: history,
+        contextEntryIds: {..._savedIds, ..._recentIds}.take(20).toList(),
+      );
+      if (!mounted) return;
+      setState(() {
+        _tutorMessages = [
+          ..._tutorMessages,
+          TutorMessage(
+            role: 'assistant',
+            content: reply.answer,
+            sources: reply.sources,
+            followUpQuestions: reply.followUpQuestions,
+          ),
+        ];
+        _tutorLoading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _tutorLoading = false;
+        _tutorError = error.toString().replaceFirst('Exception: ', '');
+      });
+    }
+  }
+
+  void _openTutorSource(TutorSource source) {
+    final cachedEntry =
+        _entries.where((entry) => entry.id == source.entryId).firstOrNull;
+    final entry = cachedEntry ??
+        DictionaryEntry(
+          id: source.entryId,
+          word: source.word,
+          translation: source.translation,
+          category: source.category.isEmpty ? 'Word' : source.category,
+          source: source.source,
+          pronunciation: source.pronunciation,
+          audioUrl: source.audioUrl,
+        );
+    if (cachedEntry == null) {
+      setState(() => _entries = [..._entries, entry]);
+    }
+    _openEntry(entry);
+  }
+
   Future<void> _openEntry(DictionaryEntry entry) async {
     _recentIds.remove(entry.id);
     _recentIds.insert(0, entry.id);
@@ -316,7 +390,21 @@ class _DictionaryShellState extends State<DictionaryShell> {
 
   @override
   Widget build(BuildContext context) {
-    final pages = [_homePage(), _browsePage(), _savedPage()];
+    final pages = [
+      _homePage(),
+      _browsePage(),
+      _savedPage(),
+      AiTutorPage(
+        messages: _tutorMessages,
+        mode: _tutorMode,
+        isLoading: _tutorLoading,
+        error: _tutorError,
+        personalWordCount: {..._savedIds, ..._recentIds}.length,
+        onModeChanged: (mode) => setState(() => _tutorMode = mode),
+        onSend: _sendTutorMessage,
+        onOpenSource: _openTutorSource,
+      ),
+    ];
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 20,
@@ -344,7 +432,28 @@ class _DictionaryShellState extends State<DictionaryShell> {
         ],
       ),
       body: SafeArea(
-          top: false, child: IndexedStack(index: _tab, children: pages)),
+        top: false,
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 420),
+          reverseDuration: const Duration(milliseconds: 300),
+          switchInCurve: Curves.easeOutCubic,
+          switchOutCurve: Curves.easeInCubic,
+          transitionBuilder: (child, animation) {
+            final slide = Tween<Offset>(
+              begin: const Offset(0.12, 0),
+              end: Offset.zero,
+            ).animate(animation);
+            return FadeTransition(
+              opacity: animation,
+              child: SlideTransition(position: slide, child: child),
+            );
+          },
+          child: KeyedSubtree(
+            key: ValueKey(_tab),
+            child: IndexedStack(index: _tab, children: pages),
+          ),
+        ),
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,
         onDestinationSelected: (index) => setState(() => _tab = index),
@@ -361,6 +470,10 @@ class _DictionaryShellState extends State<DictionaryShell> {
               icon: Icon(Icons.bookmark_border),
               selectedIcon: Icon(Icons.bookmark),
               label: 'Saved'),
+          NavigationDestination(
+              icon: Icon(Icons.auto_awesome_outlined),
+              selectedIcon: Icon(Icons.auto_awesome),
+              label: 'AI Tutor'),
         ],
       ),
     );
